@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>七芒星精确几何法阵 - 最终版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #050505; font-family: 'Courier New', Courier, monospace; }
+        canvas { display: block; }
+        
+        /* --- 1. 酷炫启动界面 --- */
+        #loader {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            z-index: 100; transition: opacity 0.8s ease-out;
+            backdrop-filter: blur(10px);
+        }
+        .loader-box {
+            border: 2px solid #ffaa00; 
+            padding: 40px 60px;
+            text-align: center;
+            box-shadow: 0 0 80px rgba(255, 170, 0, 0.4);
+            background: rgba(20, 10, 0, 0.9);
+            position: relative;
+        }
+        .loader-title {
+            color: #ffaa00; font-size: 48px; font-weight: 900; letter-spacing: 6px;
+            margin-bottom: 20px; text-shadow: 0 0 40px #ff4500;
+            text-transform: uppercase;
+        }
+        .loader-sub {
+            color: #fff; font-size: 16px; opacity: 0.9; letter-spacing: 2px;
+            animation: pulse 0.8s infinite alternate;
+        }
+        
+        /* --- 2. 左下角调试窗口 --- */
+        #debug-container {
+            position: absolute; bottom: 30px; left: 30px;
+            width: 240px; height: 180px;
+            border: 1px solid #333;
+            border-top: 2px solid #ffaa00; 
+            background: #000;
+            z-index: 50; opacity: 0.8;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+            overflow: hidden;
+        }
+        #debug-label {
+            position: absolute; top: 0; left: 0; width: 100%;
+            color: #000; font-size: 12px; font-weight: bold; text-align: center;
+            background: #ffaa00; 
+            padding: 2px 0;
+            z-index: 52; pointer-events: none;
+        }
+        #debug-canvas { width: 100%; height: 100%; transform: scaleX(-1); display: block; }
+        #video-input { display: none; }
+
+        /* --- 3. HUD 状态栏 --- */
+        #hud-top {
+            position: absolute; top: 40px; width: 100%; text-align: center;
+            pointer-events: none;
+        }
+        .hud-text {
+            display: inline-block;
+            color: #ffaa00; font-size: 18px; font-weight: bold; letter-spacing: 3px;
+            background: rgba(0, 0, 0, 0.7); border: 1px solid rgba(255, 170, 0, 0.6);
+            padding: 10px 25px; border-radius: 4px;
+            box-shadow: 0 0 20px rgba(255,170,0,0.4);
+            transition: all 0.3s;
+        }
+
+        /* --- 4. 全屏按钮 --- */
+        #fs-btn {
+            position: absolute; bottom: 40px; right: 40px;
+            background: rgba(0,0,0,0.5); border: 1px solid #ffaa00;
+            color: #ffaa00; padding: 10px 20px; cursor: pointer;
+            font-size: 14px; font-weight: bold; text-transform: uppercase; letter-spacing: 2px;
+            transition: all 0.2s; z-index: 60;
+        }
+        #fs-btn:hover { background: #ffaa00; color: #000; box-shadow: 0 0 30px #ffaa00; }
+
+        @keyframes pulse { 0% { opacity: 0.6; text-shadow: 0 0 10px #ffaa00; } 100% { opacity: 1; text-shadow: 0 0 20px #ffdd00; } }
+    </style>
+    
+    <script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils@0.6.1629159505/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils@0.3.1620248257/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="loader">
+        <div class="loader-box">
+            <div class="loader-title">MYSTIC PORTAL</div>
+            <div class="loader-sub">SYSTEM INITIALIZING...</div>
+            <div id="loading-msg" style="margin-top:20px; color:#aaa; font-size: 12px;">请允许摄像头权限并展示手心</div>
+        </div>
+    </div>
+
+    <div id="hud-top">
+        <div id="status-text" class="hud-text">WAITING FOR GESTURE</div>
+    </div>
+
+    <div id="debug-container">
+        <div id="debug-label">VISION SENSOR</div>
+        <canvas id="debug-canvas" width="320" height="240"></canvas>
+    </div>
+    
+    <video id="video-input"></video>
+
+    <button id="fs-btn">FULL SCREEN</button>
+
+    <script>
+        // --- 全局配置 ---
+        const CONFIG = {
+            baseSize: 1.8, 
+            openHandThreshold: 1.4, 
+            
+            // 经典金橙色
+            sparkColor: 0xffffee, 
+            coreColor: 0xffaa00,   
+            emberColor: 0xff4500,  
+        };
+
+        const STATE = {
+            isMerged: false,
+            hands: {
+                left: { pos: new THREE.Vector3(-5,0,0), rot: 0, scale: 0, isOpen: false, detected: false },
+                right: { pos: new THREE.Vector3(5,0,0), rot: 0, scale: 0, isOpen: false, detected: false }
+            }
+        };
+
+        let scene, camera, renderer, clock;
+        let effectLeft, effectRight, effectMerged;
+
+        // --- 1. 法阵特效 (七芒星几何体) ---
+        class EldritchEffect {
+            constructor(type) {
+                this.type = type;
+                this.group = new THREE.Group();
+                this.currentScale = 0; 
+                
+                // 1.1 核心替换：抽象的线框环 (Torus Knot)
+                const coreGeo = new THREE.TorusKnotGeometry(1.5, 0.2, 100, 16);
+                this.core = new THREE.LineSegments(
+                    new THREE.WireframeGeometry(coreGeo),
+                    new THREE.LineBasicMaterial({ color: CONFIG.coreColor, linewidth: 2, transparent: true })
+                );
+                this.core.scale.set(0,0,0);
+                this.group.add(this.core);
+
+                // 1.2 核心火花 (Sparks) - 构成七芒星线条
+                const { sparkGeo, flowData } = this.createGeometry(type);
+                this.flowData = flowData; 
+                const sparkTex = this.createTexture();
+                this.mat = new THREE.PointsMaterial({
+                    color: CONFIG.sparkColor,
+                    size: 0.08, 
+                    map: sparkTex,
+                    transparent: true,
+                    opacity: 0,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false,
+                });
+                this.sparks = new THREE.Points(sparkGeo, this.mat);
+                this.group.add(this.sparks);
+
+                // 1.3 迸发粒子 (Embers) 
+                const emberGeo = new THREE.BufferGeometry();
+                const emberPos = [];
+                const velocities = [];
+                const count = 2500; 
+                for(let i=0; i<count; i++) {
+                    const r = Math.random() * 0.5;
+                    const th = Math.random() * Math.PI * 2;
+                    emberPos.push(r*Math.cos(th), r*Math.sin(th), (Math.random()-0.5)*0.5); 
+                    velocities.push((Math.random()-0.5)*1.5, (Math.random()-0.5)*1.5, (Math.random()-0.5)*1.5); 
+                }
+                emberGeo.setAttribute('position', new THREE.Float32BufferAttribute(emberPos, 3));
+                emberGeo.setAttribute('velocity', new THREE.Float32BufferAttribute(velocities, 3));
+                
+                this.embers = new THREE.Points(emberGeo, new THREE.PointsMaterial({
+                    color: CONFIG.emberColor, 
+                    size: 0.05, 
+                    transparent: true, 
+                    blending: THREE.AdditiveBlending, 
+                    opacity: 0
+                }));
+                this.group.add(this.embers);
+
+                scene.add(this.group);
+            }
+
+            // --- 几何体生成核心修改区域 (精确七芒星) ---
+            createGeometry(type) {
+                const pts = [];
+                const flowData = []; 
+                const Z_DEPTH_LAYERS = 3; 
+
+                // 辅助函数 1: 精确绘制线段上的粒子 (用于星形结构)
+                const drawSegment = (p1, p2, density, Z_LAYERS) => {
+                    const dx = p2.x - p1.x;
+                    const dy = p2.y - p1.y;
+                    const dz = p2.z - p1.z;
+                    const length = Math.hypot(dx, dy, dz);
+                    const steps = Math.ceil(length * density);
+                    
+                    for (let i = 0; i <= steps; i++) {
+                        const t = i / steps;
+                        const rx = p1.x + dx * t;
+                        const ry = p1.y + dy * t;
+                        const rz = p1.z + dz * t;
+
+                        for (let z = 0; z < Z_LAYERS; z++) {
+                            const z_offset = (z - 1) * 0.2 + (Math.random() - 0.5) * 0.1;
+                            
+                            const final_r = Math.hypot(rx, ry);
+                            const final_th = Math.atan2(ry, rx);
+                            
+                            pts.push(rx, ry, rz + z_offset);
+                            flowData.push(final_r, final_th, Math.random());
+                        }
+                    }
+                };
+
+                // 辅助函数 2: 添加圆环粒子 (用于外部符文)
+                const addRing = (r, count, noise, Z_LAYERS) => {
+                    count = Math.ceil(count * 5); 
+                    for(let i=0; i<count; i++) {
+                        const th = Math.random() * Math.PI * 2;
+                        const rr = r + (Math.random()-0.5)*noise;
+
+                        for (let z=0; z < Z_LAYERS; z++) {
+                            const z_offset = (z - 1) * 0.2 + (Math.random()-0.5) * 0.1; 
+                            pts.push(rr*Math.cos(th), rr*Math.sin(th), z_offset);
+                            flowData.push(rr, th, Math.random());
+                        }
+                    }
+                };
+                
+                // --- 1. 结构参数定义 ---
+                const DENSITY = 100;    
+                const R_OUTER = 7.5;    
+                const R_STAR = 5.0;     
+                const N_STAR = 7;       
+                const center = new THREE.Vector3(0, 0, 0);
+
+                // 计算七芒星的 7 个顶点
+                const vertices = [];
+                for(let i=0; i<N_STAR; i++) {
+                    const angle = (i * 2 * Math.PI / N_STAR) - Math.PI / 2; 
+                    vertices.push(new THREE.Vector3(R_STAR * Math.cos(angle), R_STAR * Math.sin(angle), 0));
+                }
+                
+                // --- 2. 外部符文环 (Outer Rune Band) ---
+                addRing(R_OUTER, 100, 0.4, Z_DEPTH_LAYERS); 
+                addRing(R_OUTER - 1.5, 100, 0.2, Z_DEPTH_LAYERS); 
+                addRing(R_STAR + 0.3, 50, 0.1, Z_DEPTH_LAYERS);  
+
+                // --- 3. 七芒星核心几何 (7-Pointed Star) ---
+                for (let i = 0; i < N_STAR; i++) {
+                    const V_i = vertices[i];
+                    
+                    // A) 外层七芒星 (V_i to V_{i+2})
+                    const V_i2 = vertices[(i + 2) % N_STAR];
+                    drawSegment(V_i, V_i2, DENSITY * 0.8, Z_DEPTH_LAYERS);
+
+                    // B) 内层七芒星 (V_i to V_{i+3})
+                    const V_i3 = vertices[(i + 3) % N_STAR];
+                    drawSegment(V_i, V_i3, DENSITY * 0.8, Z_DEPTH_LAYERS);
+
+                    // C) 连接中心 (模拟中心复杂的内连线)
+                    drawSegment(V_i, center, DENSITY * 0.5, Z_DEPTH_LAYERS); 
+                }
+
+                // --- 4. 内部核心小环 (Internal Structure) ---
+                addRing(2.0, 50, 0.1, Z_DEPTH_LAYERS); 
+
+                
+                return { 
+                    sparkGeo: new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(pts, 3)),
+                    flowData: new THREE.Float32BufferAttribute(flowData, 3)
+                };
+            }
+
+            createTexture() {
+                // 纹理：经典火焰金橙色
+                const c = document.createElement('canvas'); c.width=64; c.height=64;
+                const ctx = c.getContext('2d');
+                const g = ctx.createRadialGradient(32,32,0,32,32,32);
+                g.addColorStop(0,'#ffffff');      
+                g.addColorStop(0.3,'#ffdd00');    
+                g.addColorStop(0.6,'rgba(255,100,0,0.8)'); 
+                g.addColorStop(1,'rgba(0,0,0,0)');
+                ctx.fillStyle=g; ctx.fillRect(0,0,64,64);
+                return new THREE.CanvasTexture(c);
+            }
+
+            update(targetPos, scaleFactor, rot, isOpen, isMerged, time, dt) {
+                const lerpSpeed = (scaleFactor < 0.01) ? 0.8 : 0.15;
+                let targetSize = isOpen ? scaleFactor : 0;
+                this.currentScale += (targetSize - this.currentScale) * lerpSpeed;
+                
+                if(this.currentScale < 0.01) { this.group.visible = false; return; }
+                this.group.visible = true;
+
+                // 核心粒子流动 (Sparks Flow)
+                const sparkPos = this.sparks.geometry.attributes.position.array;
+                const flowData = this.flowData.array;
+                const flowSpeedBase = isMerged ? 8.0 : 4.0; 
+                
+                for (let i = 0; i < flowData.length / 3; i++) {
+                    const index = i * 3;
+                    const r = flowData[index];
+                    let theta = flowData[index + 1];
+                    const randFactor = flowData[index + 2];
+                    
+                    const flowSpeed = flowSpeedBase * (randFactor * 0.5 + 0.5);
+                    theta += flowSpeed * dt; 
+                    flowData[index + 1] = theta; 
+
+                    sparkPos[index] = r * Math.cos(theta);
+                    sparkPos[index + 1] = r * Math.sin(theta);
+                    
+                    // Z轴高频抖动 (立体感)
+                    sparkPos[index + 2] += Math.sin(time * 50 + index) * 0.005; 
+                }
+                this.sparks.geometry.attributes.position.needsUpdate = true;
+                
+                
+                if (isMerged && this.type === 'merged') {
+                    // 大招状态：核心放大，抽象Y/X轴旋转
+                    this.core.scale.lerp(new THREE.Vector3(2, 2, 2), 0.1); 
+                    this.group.rotation.y += 0.02; 
+                    this.core.rotation.x += 0.03;  
+                    
+                    this.mat.opacity = 1.0; 
+                    this.core.material.opacity = 0.9 + Math.sin(time*30)*0.1;
+
+                } else {
+                    // 普通状态：隐藏核心，跟随手掌旋转
+                    this.core.scale.set(0,0,0);
+                    this.group.rotation.z = rot; 
+                    this.group.rotation.y = 0; 
+                    this.core.rotation.set(0,0,0);
+                    this.mat.opacity = THREE.MathUtils.clamp(this.currentScale*1.5, 0, 1.0);
+                }
+
+                this.group.position.lerp(targetPos, 0.4); 
+                
+                const jitter = 1.0 + Math.sin(time*12)*0.02;
+                const s = this.currentScale * jitter;
+                this.group.scale.set(s,s,s);
+
+                this.embers.material.opacity = this.mat.opacity * 0.9;
+
+                // 迸发粒子逻辑 (Spiral Outward, Fill Screen, 3D)
+                const positions = this.embers.geometry.attributes.position.array;
+                const vels = this.embers.geometry.attributes.velocity.array;
+                const count = positions.length / 3;
+                
+                const speedMult = isMerged ? 3.0 : 1.0;
+                const radialSpeedFactor = 1.0; 
+
+                for(let i=0; i<count; i++) {
+                    const ix = i*3; const iy = i*3+1; const iz = i*3+2;
+                    
+                    const oldX = positions[ix];
+                    const oldY = positions[iy];
+                    
+                    // 螺旋运动
+                    const angle = 0.08 * speedMult * (i%2===0?1:-1); 
+                    const cosA = Math.cos(angle);
+                    const sinA = Math.sin(angle);
+                    
+                    positions[ix] = oldX * cosA - oldY * sinA;
+                    positions[iy] = oldX * sinA + oldY * cosA;
+
+                    // 连续径向和 Z 轴速度叠加 (3D扩散)
+                    const currentRadial = new THREE.Vector3(positions[ix], positions[iy], positions[iz]).normalize();
+
+                    positions[ix] += currentRadial.x * radialSpeedFactor * dt * speedMult;
+                    positions[iy] += currentRadial.y * radialSpeedFactor * dt * speedMult;
+                    positions[iz] += currentRadial.z * radialSpeedFactor * dt * speedMult; 
+
+                    // 边界循环 (扩大边界至 25，充满屏幕)
+                    const d = Math.hypot(positions[ix], positions[iy], positions[iz]);
+                    const maxD = 25; 
+
+                    if (d > maxD) {
+                        const r = 0.5; 
+                        const th = Math.random() * Math.PI * 2;
+                        positions[ix] = r * Math.cos(th);
+                        positions[iy] = r * Math.sin(th);
+                        positions[iz] = (Math.random()-0.5) * 0.5;
+                    }
+                }
+                this.embers.geometry.attributes.position.needsUpdate = true;
+            }
+        }
+
+        // --- 2. 音效 (嗡嗡声) ---
+        class SpaceDrone {
+            constructor() {
+                const AC = window.AudioContext||window.webkitAudioContext;
+                this.ctx = new AC();
+                this.master = this.ctx.createGain();
+                this.master.connect(this.ctx.destination);
+                this.master.gain.value = 0;
+                this.oscillators = [];
+                this.playing = false;
+            }
+            start() {
+                if(this.playing) return;
+                this.playing = true; this.ctx.resume();
+                this.addOsc(55); this.addOsc(58); this.addOsc(110);
+            }
+            addOsc(f) {
+                const o = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                o.type = 'sawtooth'; o.frequency.value = f;
+                const fil = this.ctx.createBiquadFilter(); fil.type='lowpass'; fil.frequency.value=300;
+                o.connect(fil); fil.connect(g); g.connect(this.master);
+                g.gain.value = 0.3; o.start();
+                this.oscillators.push({o,g,fil});
+            }
+            update(intensity) {
+                this.master.gain.setTargetAtTime(intensity*0.5, this.ctx.currentTime, 0.1);
+                const freq = 300 + intensity * 1200; 
+                this.oscillators.forEach(o => o.fil.frequency.setTargetAtTime(freq, this.ctx.currentTime, 0.1));
+            }
+            triggerBeam() {
+                const o = this.ctx.createOscillator();
+                const g = this.ctx.createGain();
+                o.connect(g); g.connect(this.master);
+                o.frequency.setValueAtTime(200, this.ctx.currentTime);
+                o.frequency.exponentialRampToValueAtTime(800, this.ctx.currentTime+0.5);
+                g.gain.setValueAtTime(0.5, this.ctx.currentTime);
+                g.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime+0.5);
+                o.start(); o.stop(this.ctx.currentTime+0.5);
+            }
+        }
+        const audio = new SpaceDrone();
+
+        // --- 3. 视觉与逻辑循环 ---
+        function onResults(results) {
+            const loader = document.getElementById('loader');
+            if(loader.style.opacity !== '0' && results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                loader.style.opacity = 0;
+                setTimeout(()=>loader.style.display='none', 800);
+                audio.start();
+            }
+
+            const debugCanvas = document.getElementById('debug-canvas');
+            const dCtx = debugCanvas.getContext('2d');
+            dCtx.save();
+            dCtx.clearRect(0, 0, debugCanvas.width, debugCanvas.height);
+            dCtx.drawImage(results.image, 0, 0, debugCanvas.width, debugCanvas.height);
+            if (results.multiHandLandmarks) {
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(dCtx, landmarks, HAND_CONNECTIONS, {color: '#ffaa00', lineWidth: 1});
+                    drawLandmarks(dCtx, landmarks, {color: '#ffffff', lineWidth: 1, radius: 2});
+                }
+            }
+            dCtx.restore();
+
+            const lState = STATE.hands.left;
+            const rState = STATE.hands.right;
+            lState.detected = false; 
+            rState.detected = false;
+
+            if (results.multiHandLandmarks && results.multiHandedness) {
+                for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                    const landmarks = results.multiHandLandmarks[i];
+                    const label = results.multiHandedness[i].label; 
+                    
+                    const wrist = landmarks[0];
+                    const x = (wrist.x - 0.5) * -30;
+                    const y = (wrist.y - 0.5) * -20;
+                    
+                    // 手心手背检测
+                    const thumbX = landmarks[4].x;
+                    const pinkyX = landmarks[17].x;
+                    let isPalm = false;
+
+                    if (label === 'Right') {
+                        if (pinkyX > thumbX) isPalm = true;
+                    } else {
+                        if (pinkyX < thumbX) isPalm = true;
+                    }
+
+                    const midRoot = landmarks[9];
+                    const rawSize = Math.hypot(midRoot.x - wrist.x, midRoot.y - wrist.y);
+                    let handScale = rawSize * CONFIG.baseSize * 3; 
+
+                    // 开合检测
+                    const tip = landmarks[12]; const base = landmarks[9];
+                    const dTip = Math.hypot(tip.x-wrist.x, tip.y-wrist.y);
+                    const dBase = Math.hypot(base.x-wrist.x, base.y-wrist.y);
+                    const isOpen = (dTip / dBase) > CONFIG.openHandThreshold;
+                    const rot = -Math.atan2(base.x-wrist.x, base.y-wrist.y);
+
+                    if (label === 'Right') { 
+                        rState.detected = true;
+                        rState.pos.lerp(new THREE.Vector3(x,y,0), 0.5);
+                        rState.rot = rot;
+                        rState.isOpen = isOpen && isPalm;
+                        rState.scale = handScale;
+                    } else {
+                        lState.detected = true;
+                        lState.pos.lerp(new THREE.Vector3(x,y,0), 0.5);
+                        lState.rot = rot;
+                        lState.isOpen = isOpen && isPalm;
+                        lState.scale = handScale;
+                    }
+                }
+            } 
+            
+            if (!lState.detected) { lState.scale = 0; lState.isOpen = false; }
+            if (!rState.detected) { rState.scale = 0; rState.isOpen = false; }
+
+            const statusText = document.getElementById('status-text');
+            const dist = lState.pos.distanceTo(rState.pos);
+
+            // 融合逻辑
+            if (lState.detected && rState.detected) {
+                if (dist < 10) {
+                    if (!STATE.isMerged) {
+                        STATE.isMerged = true;
+                        audio.triggerBeam();
+                    }
+                } else {
+                    if (dist > 15) STATE.isMerged = false;
+                }
+
+                if(STATE.isMerged) {
+                    statusText.innerText = "状态：时空门开启";
+                    statusText.style.color = "#fff";
+                    statusText.style.textShadow = "0 0 20px #fff";
+                    statusText.style.borderColor = "#fff";
+                    audio.update(1.0);
+                } else {
+                    statusText.innerText = "状态：双手独立充能";
+                    statusText.style.color = "#ffaa00";
+                    statusText.style.textShadow = "none";
+                    statusText.style.borderColor = "rgba(255,170,0,0.6)";
+                    audio.update(0.6);
+                }
+            } else {
+                STATE.isMerged = false;
+                if ((lState.detected && lState.isOpen) || (rState.detected && rState.isOpen)) {
+                    statusText.innerText = "能量输出中...";
+                    audio.update(0.4);
+                } else {
+                    statusText.innerText = "请展示手心以激活法阵";
+                    audio.update(0);
+                }
+                statusText.style.color = "#888";
+                statusText.style.borderColor = "#444";
+            }
+        }
+
+        async function init() {
+            // Three.js Setup
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.03);
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 100);
+            camera.position.z = 16;
+            
+            renderer = new THREE.WebGLRenderer({alpha:true, antialias:false});
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+            clock = new THREE.Clock();
+
+            // 特效实例
+            effectLeft = new EldritchEffect('single');
+            effectRight = new EldritchEffect('single');
+            effectMerged = new EldritchEffect('merged');
+
+            // MediaPipe Setup (保持不变)
+            const video = document.getElementById('video-input');
+            const hands = new Hands({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`;
+            }});
+            
+            hands.setOptions({
+                maxNumHands: 2, 
+                minDetectionConfidence: 0.6, 
+                minTrackingConfidence: 0.6,
+                modelComplexity: 1
+            });
+            hands.onResults(onResults);
+            
+            const cam = new Camera(video, {
+                onFrame: async () => { await hands.send({image: video}); },
+                width: 640, height: 480
+            });
+            
+            try { await cam.start(); } 
+            catch(e) { 
+                document.getElementById('loading-msg').innerText = "错误：摄像头无法启动";
+                console.error(e);
+            }
+
+            animate();
+            
+            // Fullscreen
+            document.getElementById('fs-btn').onclick = () => {
+                document.body.requestFullscreen();
+                audio.ctx.resume();
+            }
+            window.addEventListener('click', ()=>{ audio.ctx.resume(); });
+        }
+
+        function animate() {
+            const dt = clock.getDelta();
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            if (STATE.isMerged) {
+                const center = new THREE.Vector3().lerpVectors(STATE.hands.left.pos, STATE.hands.right.pos, 0.5);
+                effectMerged.update(center, 3.0, 0, true, true, time, dt);
+                effectLeft.update(STATE.hands.left.pos, 0, 0, false, false, time, dt);
+                effectRight.update(STATE.hands.right.pos, 0, 0, false, false, time, dt);
+            } else {
+                effectMerged.update(new THREE.Vector3(), 0, 0, false, false, time, dt);
+                effectLeft.update(STATE.hands.left.pos, STATE.hands.left.scale, STATE.hands.left.rot, STATE.hands.left.isOpen, false, time, dt);
+                effectRight.update(STATE.hands.right.pos, STATE.hands.right.scale, STATE.hands.right.rot, STATE.hands.right.isOpen, false, time, dt);
+            }
+            renderer.render(scene, camera);
+        }
+
+        window.onresize = () => {
+            camera.aspect = window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        init();
+    </script>
+</body>
+</html>
